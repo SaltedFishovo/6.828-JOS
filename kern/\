@@ -5,11 +5,9 @@
 #include <inc/error.h>
 #include <inc/string.h>
 #include <inc/assert.h>
-#include <inc/stdio.h>
 
 #include <kern/pmap.h>
 #include <kern/kclock.h>
-
 
 // These variables are set by i386_detect_memory()
 size_t npages;			// Amount of physical memory (in pages)
@@ -180,7 +178,7 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
-	boot_map_region(kern_pgdir,(uintptr_t) UPAGES, PTSIZE, PADDR(pages), PTE_U);
+
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
 	// stack.  The kernel stack grows down from virtual address KSTACKTOP.
@@ -192,7 +190,7 @@ mem_init(void)
 	//       overwrite memory.  Known as a "guard page".
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
-	boot_map_region(kern_pgdir,(uintptr_t) (KSTACKTOP - KSTKSIZE), KSTKSIZE, PADDR(bootstack),PTE_W); 
+
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE.
 	// Ie.  the VA range [KERNBASE, 2^32) should map to
@@ -201,7 +199,7 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
-	boot_map_region(kern_pgdir, (uintptr_t) KERNBASE, (size_t)~0 - KERNBASE + 1,(physaddr_t)0 ,PTE_W); 
+
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
 
@@ -369,8 +367,8 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
 	// if pgdir has not been set. pgdir[0] = NULL(0). then.. what happen?
 	// there is some data in virtual address '0' !!! 
 	// p_
-	if(*p_pde & PTE_P) 
-		p_pte = KADDR((physaddr_t)(&(((pte_t*) PTE_ADDR(*p_pde))[pgtab_indx])) );
+	if((*p_pde & PTE_P) && p_pde) 
+		p_pte = KADDR(PTE_ADDR(*p_pde) + pgtab_indx);
 	else {		
 		if(!create) return NULL;
 		pp = page_alloc(ALLOC_ZERO);
@@ -399,14 +397,18 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	pte_t * p_pte;
-	size_t map_pgnum;
+	size_t pg_limt;
+	ppn_t base_vpn;
 	uint32_t create = 1;
 	
-	map_pgnum = size / PGSIZE; 		
-	for( size_t i = 1; i <= map_pgnum; i++, va += PGSIZE, pa += PGSIZE) {		
+	if((va + size > 0xFFFFFFFF) || ((pa + size) / PGSIZE >= npages))
+		 panic("boot_map_region failed!");
+		 
+	pg_limt = (size_t) (base_vpn + size / PGSIZE);		
+	for( ; base_vpn < pg_limt; base_vpn++, va += PGSIZE, pa += PGSIZE) {		
 		p_pte = pgdir_walk(pgdir, (const void *)va, create);
 		if(!p_pte) break;
-		*p_pte = pa | perm | PTE_P;				
+		*p_pte = pa | PTE_U | PTE_P;				
 	}	
 }
 
@@ -472,8 +474,8 @@ page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 	struct PageInfo * pp = NULL;
 	pte_t * p_pte = pgdir_walk(pgdir, va, create);	
 
-	//pte is not invalid AND exist(NOT NULL)!!!
-	if( (*p_pte & PTE_P) && p_pte){				
+	//Determine whether P = 1 and the page table of the va exists.
+	if( *p_pte & PTE_P ){				
 		pp = pa2page(PTE_ADDR(*p_pte));
 		if(pte_store) *pte_store = p_pte;
 	}
@@ -504,7 +506,7 @@ page_remove(pde_t *pgdir, void *va)
 	pte_store = &p_pte;
 	pp = page_lookup(pgdir, va, pte_store);
 	if(pp) {
-		*p_pte &= ~PTE_P;
+		*p_pte |= PTE_P;
 		page_decref(pp);
 		tlb_invalidate(pgdir, va);		
 	}
@@ -725,14 +727,12 @@ check_kern_pgdir(void)
 static physaddr_t
 check_va2pa(pde_t *pgdir, uintptr_t va)
 {
-	pte_t *p = NULL;
+	pte_t *p;
 
 	pgdir = &pgdir[PDX(va)];
-
 	if (!(*pgdir & PTE_P))
 		return ~0;
 	p = (pte_t*) KADDR(PTE_ADDR(*pgdir));
-
 	if (!(p[PTX(va)] & PTE_P))
 		return ~0;
 	return PTE_ADDR(p[PTX(va)]);
@@ -791,7 +791,6 @@ check_page(void)
 
 	// should be able to map pp2 at PGSIZE because it's already there
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W) == 0);
-	check_va2pa(kern_pgdir, PGSIZE);
 	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
 
